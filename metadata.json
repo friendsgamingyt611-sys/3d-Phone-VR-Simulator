@@ -1,0 +1,5 @@
+{
+  "name": "Inertial Navigation System 3D",
+  "description": "A 3D inertial navigation system that simulates phone movement in a virtual space using device sensors. It visualizes real-time position, orientation, and velocity.",
+  "requestFramePermissions": []
+}
