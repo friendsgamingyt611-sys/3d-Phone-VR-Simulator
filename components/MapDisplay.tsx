@@ -295,6 +295,8 @@ const Scene3D: React.FC<Scene3DProps> = ({
             phoneMesh.castShadow = true;
             visualGroup.add(phoneMesh);
 
+            const screenGeo = new THREE.PlaneGeometry(0.65, 1.35);
+
             // --- Ghost Phone Object ---
             const ghostGroup = new THREE.Group();
             scene.add(ghostGroup);
@@ -324,7 +326,6 @@ const Scene3D: React.FC<Scene3DProps> = ({
             
             ghostGroup.visible = false;
 
-            const screenGeo = new THREE.PlaneGeometry(0.65, 1.35);
             const screenMat = new THREE.MeshBasicMaterial({ color: 0x111111 });
             const screen = new THREE.Mesh(screenGeo, screenMat);
             screen.position.z = 0.041; 
