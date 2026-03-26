@@ -43,9 +43,19 @@ const App: React.FC = () => {
     const [clearSignal, setClearSignal] = useState<number>(0); // Signal to clear path
     
     // --- Physical Properties ---
-    const [deviceMass, setDeviceMass] = useState<number>(0.2); // kg
+    const [physicsConfig, setPhysicsConfig] = useState<PhysicsConfig>({
+        enableGravity: false,
+        elasticity: 0.5,
+        mass: 0.2, // kg
+        dimensions: {
+            width: 0.07, // 7cm
+            height: 0.14, // 14cm
+            depth: 0.008 // 8mm
+        }
+    });
     const [instantForce, setInstantForce] = useState<number>(0); // Newtons
     const [rotationSpeed, setRotationSpeed] = useState<number>(0); // deg/s
+    const [ghostPosition, setGhostPosition] = useState<Vector3D | undefined>(undefined);
 
     // --- Path Customization ---
     const [pathConfig, setPathConfig] = useState<PathConfig>({
@@ -142,7 +152,7 @@ const App: React.FC = () => {
         const data = {
             bias: { x: biasVectorRef.current.x, y: biasVectorRef.current.y, z: biasVectorRef.current.z },
             scale: { x: scaleVectorRef.current.x, y: scaleVectorRef.current.y, z: scaleVectorRef.current.z },
-            deviceMass: deviceMass,
+            physicsConfig: physicsConfig,
             northOffset: northOffsetRef.current,
             pathConfig: pathConfig
         };
@@ -162,7 +172,7 @@ const App: React.FC = () => {
                 
                 if (data.bias) biasVectorRef.current.set(data.bias.x, data.bias.y, data.bias.z);
                 if (data.scale) scaleVectorRef.current.set(data.scale.x, data.scale.y, data.scale.z);
-                if (data.deviceMass) setDeviceMass(data.deviceMass);
+                if (data.physicsConfig) setPhysicsConfig(data.physicsConfig);
                 if (data.northOffset) northOffsetRef.current = data.northOffset;
                 if (data.pathConfig) setPathConfig(data.pathConfig);
 
@@ -306,8 +316,21 @@ const App: React.FC = () => {
         const accDevice = rawAcc.clone().sub(biasVectorRef.current);
         const accWorld = accDevice.clone().applyQuaternion(deviceQuaternionRef.current);
 
-        if (!isLinear) {
+        if (!isLinear && !physicsConfig.enableGravity) {
             accWorld.y -= physicsParamsRef.current.gravity;
+        }
+
+        // Apply simulated gravity if enabled (subtracting gravity from acceleration if it's linear, or if it's not linear but we want to simulate it)
+        if (physicsConfig.enableGravity) {
+            // If it's linear, gravity is already removed by the sensor, so we add it back to simulate falling
+            if (isLinear) {
+                accWorld.y -= physicsParamsRef.current.gravity;
+            } else {
+                // If it's not linear, gravity is already in the reading. We normally subtract it to get pure motion.
+                // If we want to simulate gravity, we *don't* subtract it, so it naturally pulls down.
+                // However, we already subtracted it above if !enableGravity.
+                // So if enableGravity is true, we just leave it in the reading.
+            }
         }
 
         // Scaling
@@ -338,7 +361,7 @@ const App: React.FC = () => {
         
         const isStationary = (variance < physicsParamsRef.current.varianceThreshold) || (isRotationStable && accWorld.length() < 0.1);
 
-        if (isStationary) {
+        if (isStationary && !physicsConfig.enableGravity) {
             // Hard braking
             velocityRef.current.multiplyScalar(0.5); 
             if (velocityRef.current.lengthSq() < 0.01) {
@@ -353,7 +376,7 @@ const App: React.FC = () => {
             
             // 4. Centimeter Precision Cutoff
             // If velocity is tiny (< 2cm/s), kill it to prevent creep
-            if (velocityRef.current.lengthSq() < 0.0004) {
+            if (velocityRef.current.lengthSq() < 0.0004 && !physicsConfig.enableGravity) {
                  velocityRef.current.set(0,0,0);
             }
         }
@@ -362,14 +385,31 @@ const App: React.FC = () => {
         // Simple Euler: pos += vel * dt
         positionRef.current.addScaledVector(velocityRef.current, dt);
 
-        // Ground collision
+        // Ground collision & Elasticity
+        let currentGhostPos: Vector3D | undefined = undefined;
         if (positionRef.current.y < 0) {
+            currentGhostPos = { x: positionRef.current.x, y: positionRef.current.y, z: positionRef.current.z };
+            
+            // Elastic bounce
+            const bounceVelocity = Math.abs(velocityRef.current.y) * physicsConfig.elasticity;
+            
+            // Prevent infinite micro-bounces
+            if (bounceVelocity > 0.1) {
+                velocityRef.current.y = bounceVelocity;
+            } else {
+                velocityRef.current.y = 0;
+            }
+            
+            // Snap to floor for main position
             positionRef.current.y = 0;
-            if (velocityRef.current.y < 0) velocityRef.current.y = 0;
+        } else if (positionRef.current.y === 0 && physicsConfig.enableGravity && velocityRef.current.y <= 0) {
+            // If resting on the floor and gravity is pulling down, kill downward velocity
+            velocityRef.current.y = 0;
         }
+        setGhostPosition(currentGhostPos);
 
         // Update State
-        setInstantForce(accWorld.length() * deviceMass); 
+        setInstantForce(accWorld.length() * physicsConfig.mass); 
         setRotationSpeed(rotationRateRef.current);
         setAcceleration({ x: accWorld.x, y: accWorld.y, z: accWorld.z });
         setVelocity({ x: velocityRef.current.x, y: velocityRef.current.y, z: velocityRef.current.z });
@@ -723,6 +763,8 @@ const App: React.FC = () => {
                     orientation={orientation} 
                     velocity={velocity} 
                     acceleration={acceleration}
+                    ghostPosition={ghostPosition}
+                    physicsConfig={physicsConfig}
                     isReplaying={isReplaying}
                     recordedPath={recordedPath}
                     pathSettings={pathConfig}
@@ -830,13 +872,87 @@ const App: React.FC = () => {
                 <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
                     <div className="bg-gray-900 border border-gray-700 rounded-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto shadow-2xl">
                         <div className="p-6 border-b border-gray-800 flex justify-between items-center sticky top-0 bg-gray-900 z-10">
-                            <h2 className="text-xl font-bold text-white">Path Customization</h2>
+                            <h2 className="text-xl font-bold text-white">Settings</h2>
                             <button onClick={() => setShowSettings(false)} className="text-gray-400 hover:text-white">✕</button>
                         </div>
                         <div className="p-6 space-y-6">
-                            {/* Mode Selection */}
+                            {/* Physics Settings */}
                             <div className="space-y-3">
-                                <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-wider">Direction Mode</h3>
+                                <h3 className="text-sm font-bold text-purple-400 uppercase tracking-wider">Physics & Environment</h3>
+                                
+                                <div className="flex items-center justify-between bg-gray-800 p-3 rounded-lg">
+                                    <label className="text-sm text-white font-bold">Enable Gravity</label>
+                                    <input 
+                                        type="checkbox" 
+                                        checked={physicsConfig.enableGravity}
+                                        onChange={(e) => setPhysicsConfig(p => ({...p, enableGravity: e.target.checked}))}
+                                        className="w-5 h-5 rounded bg-gray-700 border-gray-600 text-purple-500 focus:ring-purple-500"
+                                    />
+                                </div>
+
+                                <div className="space-y-4 bg-gray-800 p-4 rounded-lg">
+                                    <div>
+                                        <div className="flex justify-between mb-1">
+                                            <label className="text-xs text-gray-400 font-bold">MASS (kg)</label>
+                                            <span className="text-xs text-white">{physicsConfig.mass.toFixed(2)}</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0.05" max="1.0" step="0.05" 
+                                            value={physicsConfig.mass}
+                                            onChange={(e) => setPhysicsConfig(p => ({...p, mass: parseFloat(e.target.value)}))}
+                                            className="w-full"
+                                        />
+                                    </div>
+                                    <div>
+                                        <div className="flex justify-between mb-1">
+                                            <label className="text-xs text-gray-400 font-bold">ELASTICITY (Bounce)</label>
+                                            <span className="text-xs text-white">{physicsConfig.elasticity.toFixed(2)}</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0" max="1" step="0.1" 
+                                            value={physicsConfig.elasticity}
+                                            onChange={(e) => setPhysicsConfig(p => ({...p, elasticity: parseFloat(e.target.value)}))}
+                                            className="w-full"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="space-y-4 bg-gray-800 p-4 rounded-lg">
+                                    <h4 className="text-xs text-gray-400 font-bold mb-2">DEVICE DIMENSIONS (m)</h4>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        <div>
+                                            <label className="text-[10px] text-gray-500 block mb-1">WIDTH</label>
+                                            <input 
+                                                type="number" step="0.01" min="0.01"
+                                                value={physicsConfig.dimensions.width}
+                                                onChange={(e) => setPhysicsConfig(p => ({...p, dimensions: {...p.dimensions, width: parseFloat(e.target.value) || 0.07}}))}
+                                                className="w-full bg-gray-900 border border-gray-700 rounded p-1 text-sm text-white text-center"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] text-gray-500 block mb-1">HEIGHT</label>
+                                            <input 
+                                                type="number" step="0.01" min="0.01"
+                                                value={physicsConfig.dimensions.height}
+                                                onChange={(e) => setPhysicsConfig(p => ({...p, dimensions: {...p.dimensions, height: parseFloat(e.target.value) || 0.14}}))}
+                                                className="w-full bg-gray-900 border border-gray-700 rounded p-1 text-sm text-white text-center"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] text-gray-500 block mb-1">DEPTH</label>
+                                            <input 
+                                                type="number" step="0.001" min="0.001"
+                                                value={physicsConfig.dimensions.depth}
+                                                onChange={(e) => setPhysicsConfig(p => ({...p, dimensions: {...p.dimensions, depth: parseFloat(e.target.value) || 0.008}}))}
+                                                className="w-full bg-gray-900 border border-gray-700 rounded p-1 text-sm text-white text-center"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="border-t border-gray-800 pt-4 space-y-3">
+                                <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-wider">Path Customization</h3>
                                 <div className="grid grid-cols-2 gap-2">
                                     {(['axis', 'cardinal'] as DirectionMode[]).map(m => (
                                         <button 

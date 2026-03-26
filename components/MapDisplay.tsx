@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef } from 'react';
-import { Vector3D, Quaternion, HistoryPoint, PathConfig } from '../types';
+import { Vector3D, Quaternion, HistoryPoint, PathConfig, PhysicsConfig } from '../types';
 
 declare const THREE: any;
 
@@ -9,6 +9,8 @@ interface Scene3DProps {
   orientation: Quaternion;
   velocity: Vector3D;
   acceleration: Vector3D;
+  ghostPosition?: Vector3D;
+  physicsConfig?: PhysicsConfig;
   isReplaying?: boolean;
   recordedPath?: HistoryPoint[]; 
   pathSettings: PathConfig;
@@ -30,6 +32,8 @@ const Scene3D: React.FC<Scene3DProps> = ({
     orientation, 
     velocity, 
     acceleration,
+    ghostPosition,
+    physicsConfig,
     isReplaying = false, 
     recordedPath = [],
     pathSettings,
@@ -45,6 +49,7 @@ const Scene3D: React.FC<Scene3DProps> = ({
   
   // Scene Objects
   const phoneGroupRef = useRef<any>(null);
+  const ghostPhoneRef = useRef<any>(null);
   const velocityArrowRef = useRef<any>(null);
   const projectorsRef = useRef<any>(null);
   
@@ -290,6 +295,35 @@ const Scene3D: React.FC<Scene3DProps> = ({
             phoneMesh.castShadow = true;
             visualGroup.add(phoneMesh);
 
+            // --- Ghost Phone Object ---
+            const ghostGroup = new THREE.Group();
+            scene.add(ghostGroup);
+            ghostPhoneRef.current = ghostGroup;
+            
+            const ghostVisualGroup = new THREE.Group();
+            ghostGroup.add(ghostVisualGroup);
+            
+            const ghostMat = new THREE.MeshStandardMaterial({ 
+                color: 0xef4444, 
+                roughness: 0.2, 
+                metalness: 0.5,
+                transparent: true,
+                opacity: 0.5
+            });
+            const ghostMesh = new THREE.Mesh(phoneGeo, ghostMat);
+            ghostVisualGroup.add(ghostMesh);
+            
+            const ghostScreenMat = new THREE.MeshBasicMaterial({ 
+                color: 0x111111,
+                transparent: true,
+                opacity: 0.5
+            });
+            const ghostScreen = new THREE.Mesh(screenGeo, ghostScreenMat);
+            ghostScreen.position.z = 0.041;
+            ghostVisualGroup.add(ghostScreen);
+            
+            ghostGroup.visible = false;
+
             const screenGeo = new THREE.PlaneGeometry(0.65, 1.35);
             const screenMat = new THREE.MeshBasicMaterial({ color: 0x111111 });
             const screen = new THREE.Mesh(screenGeo, screenMat);
@@ -508,6 +542,48 @@ const Scene3D: React.FC<Scene3DProps> = ({
       // Position & Orientation (Same for Live and Replay - App.tsx handles the source of truth)
       phoneGroupRef.current.position.set(position.x, position.y, position.z);
       phoneGroupRef.current.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+
+      // Update phone dimensions if physics config is provided
+      if (physicsConfig && physicsConfig.dimensions) {
+          const { width, height, depth } = physicsConfig.dimensions;
+          const visualGroup = phoneGroupRef.current.children[0];
+          if (visualGroup && visualGroup.children.length > 0) {
+              const phoneMesh = visualGroup.children[0];
+              phoneMesh.scale.set(width / 0.7, height / 1.4, depth / 0.08); // Scale relative to default
+              
+              if (visualGroup.children.length > 1) {
+                   const screen = visualGroup.children[1];
+                   screen.scale.set(width / 0.7, height / 1.4, 1);
+                   screen.position.z = (depth / 2) + 0.001;
+              }
+          }
+      }
+
+      if (ghostPhoneRef.current) {
+          if (ghostPosition) {
+              ghostPhoneRef.current.visible = true;
+              ghostPhoneRef.current.position.set(ghostPosition.x, ghostPosition.y, ghostPosition.z);
+              ghostPhoneRef.current.quaternion.set(orientation.x, orientation.y, orientation.z, orientation.w);
+              
+              // Update ghost dimensions
+              if (physicsConfig && physicsConfig.dimensions) {
+                  const { width, height, depth } = physicsConfig.dimensions;
+                  const ghostVisualGroup = ghostPhoneRef.current.children[0];
+                  if (ghostVisualGroup && ghostVisualGroup.children.length > 0) {
+                      const ghostMesh = ghostVisualGroup.children[0];
+                      ghostMesh.scale.set(width / 0.7, height / 1.4, depth / 0.08);
+                      
+                      if (ghostVisualGroup.children.length > 1) {
+                           const ghostScreen = ghostVisualGroup.children[1];
+                           ghostScreen.scale.set(width / 0.7, height / 1.4, 1);
+                           ghostScreen.position.z = (depth / 2) + 0.001;
+                      }
+                  }
+              }
+          } else {
+              ghostPhoneRef.current.visible = false;
+          }
+      }
 
       // Camera tracking
       if(controlsRef.current) {

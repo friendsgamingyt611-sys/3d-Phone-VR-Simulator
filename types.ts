@@ -23,6 +23,17 @@ export interface HistoryPoint {
 export type DirectionMode = 'axis' | 'cardinal';
 export type PhysicsMode = 'speed' | 'accel';
 
+export interface PhysicsConfig {
+    enableGravity: boolean;
+    elasticity: number;
+    mass: number;
+    dimensions: {
+        width: number;
+        height: number;
+        depth: number;
+    };
+}
+
 export interface PathConfig {
     // Visual Modes
     directionMode: DirectionMode;
