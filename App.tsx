@@ -437,8 +437,13 @@ const App: React.FC = () => {
         setStatus('North Set');
     };
 
-    const startCalibrationWizard = () => {
+    const startCalibrationWizard = async () => {
         if (!isPhysicsReady) return; 
+        const granted = await requestPermissions();
+        if (!granted) {
+            setStatus('Permission Denied');
+            return;
+        }
         scaleVectorRef.current.set(1,1,1);
         setCalibrationStep('floor_wait');
         setStatus('Calibration Started');
@@ -504,13 +509,26 @@ const App: React.FC = () => {
         }, 2000);
     };
 
-    const handleZeroSensors = () => {
+    const handleZeroSensors = async () => {
+        if (permissionStatus !== 'granted') {
+            const granted = await requestPermissions();
+            if (!granted) return;
+        }
         isZeroingRef.current = true;
         zeroingBufferRef.current = [];
         setStatus('Zeroing Sensors...');
+
+        // Timeout to detect lack of sensor data (e.g. on desktop)
+        setTimeout(() => {
+            if (isZeroingRef.current && zeroingBufferRef.current.length === 0) {
+                isZeroingRef.current = false;
+                setStatus('Error: No Sensor Data');
+                setCalibrationStep('idle');
+            }
+        }, 3000);
     };
 
-    const requestPermissions = async () => {
+    const requestPermissions = async (): Promise<boolean> => {
         if (typeof DeviceMotionEvent !== 'undefined' && (DeviceMotionEvent as any).requestPermission) {
             try {
                 const response = await (DeviceMotionEvent as any).requestPermission();
@@ -518,15 +536,19 @@ const App: React.FC = () => {
                 if (response === 'granted') {
                     window.addEventListener('devicemotion', handleMotion as any);
                     window.addEventListener('deviceorientation', handleOrientation as any);
+                    return true;
                 }
+                return false;
             } catch (e) {
                 console.error(e);
                 setPermissionStatus('denied');
+                return false;
             }
         } else {
             setPermissionStatus('granted');
             window.addEventListener('devicemotion', handleMotion as any);
             window.addEventListener('deviceorientation', handleOrientation as any);
+            return true;
         }
     };
 
@@ -545,11 +567,15 @@ const App: React.FC = () => {
         setClearSignal(prev => prev + 1);
     };
 
-    const toggleTracking = () => {
+    const toggleTracking = async () => {
         if (isTracking) {
             setIsTracking(false);
             setStatus('Stopped');
         } else {
+            if (permissionStatus !== 'granted') {
+                const granted = await requestPermissions();
+                if (!granted) return;
+            }
             clearPath();
             positionRef.current.set(0,0,0);
             velocityRef.current.set(0,0,0);
