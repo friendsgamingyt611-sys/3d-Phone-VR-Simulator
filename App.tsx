@@ -39,6 +39,7 @@ const App: React.FC = () => {
     const [showSettings, setShowSettings] = useState<boolean>(false);
     const [calibrationMsg, setCalibrationMsg] = useState<string>('');
     const [paramUpdateTrigger, setParamUpdateTrigger] = useState<number>(0);
+    const [measuredDistance, setMeasuredDistance] = useState<number>(0);
     const [clearSignal, setClearSignal] = useState<number>(0); // Signal to clear path
     
     // --- Physical Properties ---
@@ -115,7 +116,7 @@ const App: React.FC = () => {
     const physicsParamsRef = useRef({
         gravity: 9.80665,       
         drag: 3.0,              // HIGH FRICTION: Stops "ice skating" effect
-        motionThreshold: 0.15,  // STEEP DEADZONE: Ignores < 0.15 m/s^2 noise
+        motionThreshold: 0.05,  // REDUCED DEADZONE: Allows smaller calibration movements
         varianceThreshold: 0.015, // HIGHER VARIANCE: Easier to detect "stationary"
         zuptWindow: 12,         // Quick Stationary Detection (approx 0.2s)
         continuousBias: true,   
@@ -320,11 +321,10 @@ const App: React.FC = () => {
         
         // 1. Axis-Specific Deadzones
         // Horizontal movement is prone to "Gravity Leak" (tilt interpreted as move).
-        // We apply a higher threshold to X/Z than Y.
         const baseThreshold = physicsParamsRef.current.motionThreshold;
         if (Math.abs(accWorld.y) < baseThreshold) accWorld.y = 0;
-        if (Math.abs(accWorld.x) < baseThreshold * 1.5) accWorld.x = 0; // Stricter Horizontal
-        if (Math.abs(accWorld.z) < baseThreshold * 1.5) accWorld.z = 0; // Stricter Horizontal
+        if (Math.abs(accWorld.x) < baseThreshold) accWorld.x = 0;
+        if (Math.abs(accWorld.z) < baseThreshold) accWorld.z = 0;
 
         // 2. ZUPT (Zero Velocity Update)
         // If rotation is low AND acceleration variance is low -> We are stationary.
@@ -379,6 +379,12 @@ const App: React.FC = () => {
              setPosition({ x: positionRef.current.x, y: positionRef.current.y, z: positionRef.current.z });
         }
 
+        if (calibrationStepRef.current === 'vertical_measuring') {
+            setMeasuredDistance(Math.abs(positionRef.current.y));
+        } else if (calibrationStepRef.current === 'horizontal_measuring') {
+            setMeasuredDistance(Math.sqrt(positionRef.current.x**2 + positionRef.current.z**2));
+        }
+
         if (isTrackingRef.current) {
             historyRef.current.push({ 
                 p: { x: positionRef.current.x, y: positionRef.current.y, z: positionRef.current.z },
@@ -391,27 +397,32 @@ const App: React.FC = () => {
         }
     };
 
-    const handleOrientation = (event: DeviceOrientationEventWithPermission) => {
+    const handleOrientation = (event: any) => {
         if (typeof THREE === 'undefined' || !deviceQuaternionRef.current) return;
         if (isReplayingRef.current) return;
 
-        const alpha = event.alpha ? THREE.MathUtils.degToRad(event.alpha) : 0;
-        const beta = event.beta ? THREE.MathUtils.degToRad(event.beta) : 0;
-        const gamma = event.gamma ? THREE.MathUtils.degToRad(event.gamma) : 0;
-        const orientDeg = window.screen?.orientation?.angle ?? 0;
+        let alpha = event.alpha ? THREE.MathUtils.degToRad(event.alpha) : 0;
+        let beta = event.beta ? THREE.MathUtils.degToRad(event.beta) : 0;
+        let gamma = event.gamma ? THREE.MathUtils.degToRad(event.gamma) : 0;
+
+        // iOS compass heading or absolute orientation
+        if (event.webkitCompassHeading !== undefined) {
+            alpha = THREE.MathUtils.degToRad(360 - event.webkitCompassHeading);
+        }
+
+        const orientDeg = window.screen?.orientation?.angle ?? window.orientation ?? 0;
         const orient = THREE.MathUtils.degToRad(orientDeg);
 
         const euler = new THREE.Euler(beta, alpha, -gamma, 'YXZ');
         const q = new THREE.Quaternion();
         q.setFromEuler(euler);
 
-        const q_rot = new THREE.Quaternion();
-        q_rot.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -orient);
-        q.premultiply(q_rot);
+        const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // - PI/2 around X
+        q.multiply(q1);
 
-        const q_fix = new THREE.Quaternion();
-        q_fix.setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
-        q.multiply(q_fix);
+        const q0 = new THREE.Quaternion();
+        q0.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -orient);
+        q.multiply(q0);
         
         const northRad = THREE.MathUtils.degToRad(northOffsetRef.current);
         const q_north = new THREE.Quaternion();
@@ -423,8 +434,7 @@ const App: React.FC = () => {
         
         setOrientation({ x: q.x, y: q.y, z: q.z, w: q.w });
         
-        let rawDeg = (360 - THREE.MathUtils.radToDeg(alpha) + 90) % 360;
-        if (event.webkitCompassHeading) rawDeg = event.webkitCompassHeading;
+        let rawDeg = event.webkitCompassHeading !== undefined ? event.webkitCompassHeading : (360 - THREE.MathUtils.radToDeg(alpha));
         let adjustedHeading = (rawDeg - northOffsetRef.current + 360) % 360;
         setHeading(adjustedHeading);
     };
@@ -529,26 +539,40 @@ const App: React.FC = () => {
     };
 
     const requestPermissions = async (): Promise<boolean> => {
-        if (typeof DeviceMotionEvent !== 'undefined' && (DeviceMotionEvent as any).requestPermission) {
+        let granted = true;
+        
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof (DeviceMotionEvent as any).requestPermission === 'function') {
             try {
                 const response = await (DeviceMotionEvent as any).requestPermission();
-                setPermissionStatus(response);
-                if (response === 'granted') {
-                    window.addEventListener('devicemotion', handleMotion as any);
-                    window.addEventListener('deviceorientation', handleOrientation as any);
-                    return true;
-                }
-                return false;
+                if (response !== 'granted') granted = false;
             } catch (e) {
                 console.error(e);
-                setPermissionStatus('denied');
-                return false;
+                granted = false;
             }
-        } else {
+        }
+        
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+            try {
+                const response = await (DeviceOrientationEvent as any).requestPermission();
+                if (response !== 'granted') granted = false;
+            } catch (e) {
+                console.error(e);
+                granted = false;
+            }
+        }
+
+        if (granted) {
             setPermissionStatus('granted');
             window.addEventListener('devicemotion', handleMotion as any);
-            window.addEventListener('deviceorientation', handleOrientation as any);
+            if ('ondeviceorientationabsolute' in window) {
+                window.addEventListener('deviceorientationabsolute', handleOrientation as any);
+            } else {
+                window.addEventListener('deviceorientation', handleOrientation as any);
+            }
             return true;
+        } else {
+            setPermissionStatus('denied');
+            return false;
         }
     };
 
@@ -784,13 +808,19 @@ const App: React.FC = () => {
                             <button onClick={startVerticalMeasure} className="w-full py-4 bg-cyan-600 hover:bg-cyan-500 rounded-xl font-bold text-xl">Start Lift</button>
                         )}
                          {calibrationStep === 'vertical_measuring' && (
-                            <button onClick={finishVerticalMeasure} className="w-full py-4 bg-green-600 hover:bg-green-500 rounded-xl font-bold text-xl">Done Lifting</button>
+                            <>
+                                <div className="text-3xl text-cyan-400 font-mono mb-4">{measuredDistance.toFixed(2)} m</div>
+                                <button onClick={finishVerticalMeasure} className="w-full py-4 bg-green-600 hover:bg-green-500 rounded-xl font-bold text-xl">Done Lifting</button>
+                            </>
                         )}
                         {calibrationStep === 'horizontal_intro' && (
                             <button onClick={startHorizontalMeasure} className="w-full py-4 bg-cyan-600 hover:bg-cyan-500 rounded-xl font-bold text-xl">Start Move</button>
                         )}
                          {calibrationStep === 'horizontal_measuring' && (
-                            <button onClick={finishHorizontalMeasure} className="w-full py-4 bg-green-600 hover:bg-green-500 rounded-xl font-bold text-xl">Done Moving</button>
+                            <>
+                                <div className="text-3xl text-cyan-400 font-mono mb-4">{measuredDistance.toFixed(2)} m</div>
+                                <button onClick={finishHorizontalMeasure} className="w-full py-4 bg-green-600 hover:bg-green-500 rounded-xl font-bold text-xl">Done Moving</button>
+                            </>
                         )}
                     </div>
                 </div>
